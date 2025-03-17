@@ -5,7 +5,7 @@ ClusterUtil is a collection of utility scripts for HPC cluster usage and serves 
 
 ```bash
 #clone this repo
-git clone https://github.com/jweile/clusterUtil.git
+git clone https://github.com/FowlerLab/clusterUtil
 #change to repo folder
 cd clusterUtil
 #run installer
