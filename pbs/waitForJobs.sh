@@ -3,13 +3,13 @@ VERSION="1.0.0"
 
 #helper function to print usage information
 usage () {
-  cat << EOF
+  cat << "EOF"
 
-waitForJobs.sh v${VERSION} 
+waitForJobs.sh v0.0.1 
 
 by Jochen Weile <jochenweile@gmail.com> 2021
 
-Waits for the specified set of PBS jobs to complete
+Waits for the specified set of SGE jobs to complete
 Usage: waitForJobs.sh [-v|--verbose] [-i|--interval <SECONDS>]
     [-h|--help] [--] [<JOBS>]
 
@@ -19,20 +19,20 @@ Usage: waitForJobs.sh [-v|--verbose] [-i|--interval <SECONDS>]
 <JOBS>        : comma-separated list of job IDs. For example 12345,12346
 
 Tip: To capture the job ID of a job submission you can use:
-RETVAL=\$(submitjob.sh myJob.sh)
-JOBID=\${RETVAL##* }
+RETVAL=$(submitjob.sh myJob.sh)
+JOBID=${RETVAL##* }
 
 EOF
  exit $1
 }
 
-#check if PBS is installed
-PBS_PATH=$(which qstat)
-if [ -x "$PBS_PATH" ] ; then
-  echo "PBS detected at: $PBS_PATH"
+#check if SGE is installed
+SGE_PATH=$(which qstat)
+if [ -x "$SGE_PATH" ] ; then
+  echo "SGE detected at: $SGE_PATH"
 else
   >&2 echo "#########################################"
-  >&2 echo "ERROR: PBS appears to not be installed!"
+  >&2 echo "ERROR: SGE appears to not be installed!"
   >&2 echo "#########################################"
   usage 1
 fi
@@ -100,29 +100,8 @@ fi
 #print extra newline to make room for job counter
 echo ""
 
-truncateIDs() {
-  OUT=""
-  for ID in $1; do
-    if [[ -z $OUT ]]; then
-      OUT="${ID%%.*}"
-    else
-      OUT="$OUT ${ID%%.*}"
-    fi
-  done
-  echo "$OUT"
-}
-
 #create temporary file for squeue output
 TMPFILE=$(mktemp)
-#and a temp file for squeue error messages
-TMPERRFILE=$(mktemp)
-#and a temp file for the list of active jobs
-TMPACTIVE=$(mktemp)
-
-#$ACTIVEJOBS is a space-separated list of active job IDs
-ACTIVEJOBS=$(truncateIDs "${JOBS//,/ }")
-#a newline-separated version is also stored in the $TMPACTIVE file
-echo "${ACTIVEJOBS// /$'\n'}">$TMPACTIVE
 
 #the number of currently active jobs (with 1 pseudo-job to begin with)
 CURRJOBNUM=1
@@ -131,46 +110,23 @@ while (( $CURRJOBNUM > 0 )); do
   #wait for time interval
   sleep $INTERVAL
 
-  # query job information
-  if [ -z "$JOBS" ]; then
-    qstat -u $USER|tail -n+6>$TMPFILE
-    #count number of jobs
-    CURRJOBNUM=$(cat $TMPFILE|awk '{if ($10!="C"){print $1}}'|wc -l)
+  # query job information and store in temp file (in case we want more info later)
+  qstat -u $USER|tail -n+3>$TMPFILE
+
+  #Update the list of active jobs
+  if [[ -n "$JOBS" ]]; then
+    #ACTIVEJOBS is a newline-separated list of active job ids
+    #if JOBS input list was specified, we use it to filter the output
+    ACTIVEJOBS=$(awk '{print $1}' "$TMPFILE"|grep -P "${JOBS//,/|}")
+  else 
+    ACTIVEJOBS=$(awk '{print $1}' "$TMPFILE")
+  fi
+  #count number of jobs
+  if [[ -z "$ACTIVEJOBS" ]]; then
+    #when the list is empty, echo still returns a newline character which wc would count as 1 line
+    CURRJOBNUM=0
   else
-    # #redirect stdout and stderror into different pipes to record statuses and errors
-    # { qstat -u $USER ${ACTIVEJOBS}|tail -n+6>"$TMPFILE" ; } 2>&1 | grep "Unknown Job Id">"$TMPERRFILE"
-    # # Completed jobs disappear from the PBS database after a while and will cause errors if queried.
-    # # So they need to be removed from the $ACTIVEJOBS list to prevent cascading errors.
-    # #extract list of completed jobs from qstat output
-    # COMPLETED=$(cat $TMPFILE|awk '{if ($10=="C"){print $1}}')
-    # #check if any errors regarding unrecognized job IDs occurred
-    # if (( $(cat $TMPERRFILE|wc -l) > 0 )); then
-    #   #if so, extract the missing job IDs and add them to the 'completed' list
-    #   MISSING=$(awk 'NF>1{print $NF}' "$TMPERRFILE"|sort|uniq)
-    #   COMPLETED=$(printf "$COMPLETED\n$MISSING"|sort|uniq)
-    #   printf "\nDropping missing jobs: ${MISSING//$'\n'/, }\n" >&2
-    # fi
-    # #if the completed list is not empty...
-    # if (( $(echo "$COMPLETED"|wc -l) > 0 )); then
-    #   #remove them from the active jobs list
-    #   ACTIVEJOBS=$(grep -vP "${COMPLETED//$'\n'/|}" $TMPACTIVE)
-    #   #make sure to re-convert newlines into spaces on the active list
-    #   ACTIVEJOBS=${ACTIVEJOBS//$'\n'/ }
-    #   #and also update the temporary file
-    #   echo "${ACTIVEJOBS// /$'\n'}">$TMPACTIVE
-    # fi
-    qstat -u $USER ${ACTIVEJOBS}|tail -n+6>"$TMPFILE"
-    NOTCOMPLETED=$(cat $TMPFILE|awk '{if ($10!="C"){print $1}}')
-    ACTIVEJOBS=$(truncateIDs "${NOTCOMPLETED//$'\n'/ }")
-    if [[ -z "$ACTIVEJOBS" ]]; then
-      #an empty file terminating in \n still counts as having one line, so we need to 
-      #force a completley empty file
-      printf "">$TMPACTIVE
-    else 
-      echo "${ACTIVEJOBS// /$'\n'}">$TMPACTIVE
-    fi
-    #count number of active jobs
-    CURRJOBNUM=$(cat $TMPACTIVE|wc -l)
+    CURRJOBNUM=$(echo "$ACTIVEJOBS"|wc -l)
   fi
 
   #Print status update (if verbose)
@@ -189,19 +145,8 @@ while (( $CURRJOBNUM > 0 )); do
 done
 
 #clean up
-rm $TMPFILE $TMPERRFILE $TMPACTIVE
+rm $TMPFILE 
 
 if [[ $VERBOSE == 1 ]]; then
   printf "\r$(date) INFO: Done!              \n"
 fi
-
-# Job status codes:  
-# C -     Job is completed after having run/
-# E -  Job is exiting after having run.
-# H -  Job is held.
-# Q -  job is queued, eligible to run or routed.
-# R -  job is running.
-# T -  job is being moved to new location.
-# W -  job is waiting for its execution time
-#     (-a option) to be reached.
-# S -  (Unicos only) job is suspend.

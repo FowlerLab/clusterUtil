@@ -3,7 +3,7 @@ VERSION="1.0.0"
 
 #DEFAULT PARAMETERS
 #change as desired below
-LOGDIR=$HOME/pbslogs
+LOGDIR=$HOME/sgelogs
 TIME="01:00:00"
 DATETIME=$(date +%Y%m%d%H%M%S)
 ALPHATAG=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 8)
@@ -22,16 +22,16 @@ SCRIPT=${LOGDIR}/${JOBNAME}.sh
 usage () {
   cat << EOF
 
-submitjob.sh v${VERSION}
+submitjob.sh v0.0.1 
 
 by Jochen Weile <jochenweile@gmail.com> 2021
 
-Submits a new PBS job
+Submits a new SGE job
 Usage: submitjob.sh [-n|--name <JOBNAME>] [-t|--time <WALLTIME>] 
     [-c|cpus <NUMCPUS>] [-m|--mem <MEMORY>] [-l|--log <LOGFILE>] 
     [-e|--err <ERROR_LOGFILE>] [--conda <ENV>] [--blacklist <LIST>]
     [--skipValidation] [--report] [--] <CMD>[--] <CMD>
-
+    
 -n|--name : Job name. Defaults to ${USER}_<TIMESTAMP>_<RANDOMSTRING>
 -t|--time : Maximum (wall-)runtime for this job in format HH:MM:SS.
             Defaults to ${TIME}
@@ -61,16 +61,17 @@ EOF
  exit $1
 }
 
-#check if PBS is installed
-PBS_PATH=$(which qsub)
-if [ -x "$PBS_PATH" ] ; then
-  echo "PBS detected at: $PBS_PATH"
+#check if SGE is installed
+SGE_PATH=$(which qsub)
+if [ -x "$SGE_PATH" ] ; then
+  echo "SGE detected at: $SGE_PATH"
 else
   >&2 echo "##########################################"
-  >&2 echo "ERROR: PBS doesn't appear to be installed!"
+  >&2 echo "ERROR: SGE doesn't appear to be installed!"
   >&2 echo "##########################################"
   usage 1
 fi
+
 
 #Parse Arguments
 PARAMS=""
@@ -191,6 +192,14 @@ while (( "$#" )); do
   esac
 done
 
+#SGE job names are not allowed to start with digits, so we check if that's the case
+#and prepend an "X"-character if so.
+RX="^[0-9]+"
+if [[ "$JOBNAME" =~ $RX ]]; then
+  JOBNAME=X"$JOBNAME"
+  echo "WARNING: Adjusted non-compliant job name to: $JOBNAME"
+fi
+
 #check if conda or mamba is installed
 if [[ -n $(command -v conda) ]]; then
   CONDAMGR=conda
@@ -214,7 +223,7 @@ if [[ -n "$CONDAENV" && -z "$SKIPVALIDATION" ]]; then
 fi
 
 if ! [[ -z $BLACKLIST ]]; then
-  echo "WARNING: Blacklisting is not currently supported for PBS"
+  echo "WARNING: Blacklisting is not currently supported for SGE"
 fi
 
 #create logdir if it doesn't exist
@@ -223,27 +232,29 @@ mkdir -p $LOGDIR
 LOG=$(readlink -f $LOG)
 ERRLOG=$(readlink -f $ERRLOG)
 
-#write the PBS submission script
+#write the SGE submission script
 echo "#!/bin/bash">$SCRIPT
-echo "#PBS -S /bin/bash">>$SCRIPT
-echo "#PBS -N $JOBNAME">>$SCRIPT
-echo "#PBS -l nodes=1:ppn=$CPUS,walltime=$TIME,mem=$MEM">>$SCRIPT
+echo "#$ -S /bin/bash">>$SCRIPT
+echo "#$ -N $JOBNAME">>$SCRIPT
+echo "#$ -binding linear:$CPUS">>$SCRIPT
+echo "#$ -l m_thread=$CPUS">>$SCRIPT
+echo "#$ -l h_rt=$TIME ">>$SCRIPT
+echo "#$ -l h_vmem=$MEM">>$SCRIPT
 if ! [[ -z $QUEUE ]]; then
-  echo "#PBS -q $QUEUE">>$SCRIPT
+  echo "#$ -q $QUEUE">>$SCRIPT
 fi
-  echo "#PBS -o localhost:$LOG">>$SCRIPT
+echo "#$ -o $LOG">>$SCRIPT
 #if log and errlog are supposed to be the same file, then we need to merge stderr into stdout
 if [[ "$LOG" == "$ERRLOG" ]]; then
-  echo "#PBS -j oe">>$SCRIPT
+  echo "#$ -j y">>$SCRIPT
 else
-  echo "#PBS -e localhost:$ERRLOG">>$SCRIPT
+  echo "#$ -e $ERRLOG">>$SCRIPT
 fi
-echo "#PBS -d $(pwd)">>$SCRIPT
-echo "#PBS -V">>$SCRIPT
-echo "export PBS_NCPU=$CPUS">>$SCRIPT
+echo "#$ -cwd">>$SCRIPT
+echo "#$ -V">>$SCRIPT
 if ! [[ -z "$CONDAENV" ]]; then
   #if we're in the base environment, activate the desired new environment
-  if [[ -z $CONDA_DEFAULT_ENV || $CONDA_DEFAULT_ENV == "base" ]]; then
+  if [[ -z $CONDA_DEFAULT_ENV || $CONDA_DEFAULT_ENV == "base" || "$CONDA_DEFAULT_ENV" == "$CONDAENV" ]]; then
     echo 'source ${CONDA_PREFIX}'"/etc/profile.d/${CONDAMGR}.sh">>$SCRIPT
     echo "${CONDAMGR} activate $CONDAENV">>$SCRIPT
     ACTIVATED=1
@@ -252,14 +263,12 @@ if ! [[ -z "$CONDAENV" ]]; then
     echo "Current environment is neither base nor $CONDAENV. Unable to proceed">&2
     exit 1
   fi
-  #using single quotes to ensure that the CONDA_PREFIX variable doesn't get evaluated until PBS script is executed
+  #using single quotes to ensure that the CONDA_PREFIX variable doesn't get evaluated until SGE script is executed
   #this way we're not inserting the prefix of any currently active environment
   # echo 'source ${CONDA_PREFIX}/etc/profile.d/conda.sh'>>$SCRIPT
-  # echo "conda activate $CONDAENV">>$SCRIPT
+  # echo "source activate $CONDAENV">>$SCRIPT
 fi
-#some versions of PBS don't support the -d argument, so we're changing directories manually as well.
-echo "cd $(pwd)">>$SCRIPT
-echo "$CMD">>$SCRIPT
+echo "$CMD >> $LOG 2>&1">>$SCRIPT
 echo 'EXITCODE=$?'>>$SCRIPT
 if [[ -n $ACTIVATED ]]; then
   echo "${CONDAMGR} deactivate">>$SCRIPT
@@ -272,5 +281,13 @@ echo 'exit $EXITCODE'>>$SCRIPT
 #make script executable
 chmod u+x $SCRIPT
 
-#and submit
-qsub $SCRIPT
+#submit, and record the job id
+RETVAL=$(qsub $SCRIPT 2>&1)
+RX="Your job ([0-9]+) .+ has been submitted"
+if [[ "$RETVAL" =~ $RX ]]; then
+  echo ${BASH_REMATCH[1]}
+else
+  echo "Submission failed!">&2
+  echo $RETVAL>&2
+  exit 1
+fi
